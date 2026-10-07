@@ -39,6 +39,12 @@ local OUT_SIGNAL = "signal-green"
 -- ── Read temperature from red wire ───────────────────────────
 -- Try both common signal names; check your signal monitor to see
 -- which one the reactor is actually putting on the wire.
+-- NOTE: this intentionally reads the raw `red` table instead of
+-- get_signal(name, "red") — get_signal() defaults a missing signal to
+-- 0, which would make it indistinguishable from "reactor really is at
+-- 0°C". The raw table lookup preserves that distinction so the
+-- TEMP_SIGNAL/"T"/"temperature" fallback chain only kicks in when a
+-- name is genuinely absent from the wire, not just reading 0.
 local temp = red[TEMP_SIGNAL] or red["T"] or red["temperature"] or 0
 
 -- ── Hysteresis state machine ──────────────────────────────────
@@ -65,13 +71,14 @@ if storage.enabled then
     set_output("virtual", OUT_SIGNAL, 1)
 end
 
--- ── Optional status print ─────────────────────────────────────
--- Uncomment to log temperature changes to chat.
+-- ── Optional status log ───────────────────────────────────────
+-- Uncomment to record temperature changes to factorio-current.log
+-- (quieter than print(), which would spam every player's chat).
 -- storage.last_state = storage.last_state
 -- if storage.last_state ~= storage.enabled then
 --     storage.last_state = storage.enabled
---     print("Reactor output: " .. (storage.enabled and "ON" or "OFF")
---           .. "  temp=" .. temp .. "°C")
+--     log("Reactor output:", storage.enabled and "ON" or "OFF",
+--         " temp=" .. temp .. "°C")
 -- end
 
 -- ============================================================

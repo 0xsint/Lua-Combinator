@@ -3,6 +3,8 @@
 -- ===========================================================================
 --
 -- PLAYER API (available inside every combinator's code block):
+-- Full details, examples, and gotchas: see API_REFERENCE.md in this mod's
+-- folder.
 --
 --   tick          (number)  Current game tick.
 --   red           (table)   { [signal_name] = count }  Red-wire inputs.
@@ -14,7 +16,31 @@
 --                           name : signal name string (e.g. "iron-plate",
 --                                  "water", "signal-A", "signal-red")
 --                           count: integer
+--   clear_output()          Discards any output signals queued so far this
+--                           execution (e.g. to override earlier set_output
+--                           calls based on later logic).
+--   get_signal(name [, color])
+--                           Reads a signal's value. With no color, returns
+--                           red+green combined; color is "red" or "green"
+--                           to read just that wire. Shorthand for
+--                           (red[name] or 0) + (green[name] or 0).
+--   get_network(color [, side])
+--                           Returns the raw LuaCircuitNetwork for a wire,
+--                           without needing defines.wire_connector_id.*.
+--                           color: "red" | "green". side: "input" (default)
+--                           | "output".
 --   print(...)              Prints a message to the game chat (all players).
+--   dump(...)               Like print(), but tables are pretty-printed
+--                           (via inspect()) instead of showing as addresses.
+--   log(...)                Writes to the log file (factorio-current.log)
+--                           instead of chat; tables are pretty-printed.
+--   inspect(value)          Returns a deterministic, human-readable string
+--                           for any value (tables included).
+--   clamp(value, min, max)  Clamps value into [min, max]. Either bound may
+--                           be nil to leave that side unclamped.
+--   round(value [, decimals])
+--                           Rounds value to the given decimal places
+--                           (default 0).
 --   storage       (table)   Persistent per-combinator table.  Data survives
 --                           across ticks and game loads.
 --   math / table / string / pairs / ipairs / type / tonumber / tostring /
@@ -67,6 +93,43 @@ local function format_signals(net)
     if #lines == 0 then return "(none)" end
     table.sort(lines)
     return table.concat(lines, "\n")
+end
+
+--- Pretty-print a value for debugging. Tables are serialized deterministically
+--- (sorted keys, no raw memory addresses) via serpent so the result is safe
+--- to compare across machines/players; everything else just uses tostring().
+local function inspect(value)
+    if type(value) == "table" then
+        local ok, serialized = pcall(serpent.block, value, {sortkeys = true, comment = false})
+        return ok and serialized or "<unserializable table>"
+    end
+    return tostring(value)
+end
+
+--- Clamp a number into the inclusive [min, max] range. Either bound may be
+--- omitted (nil) to leave that side unclamped.
+local function clamp(value, min, max)
+    value = tonumber(value) or 0
+    if min and value < min then return min end
+    if max and value > max then return max end
+    return value
+end
+
+--- Round a number to the given number of decimal places (default 0).
+local function round(value, decimals)
+    value = tonumber(value) or 0
+    local mult = 10 ^ (decimals or 0)
+    return math.floor(value * mult + 0.5) / mult
+end
+
+--- Write a debug message to the log file (factorio-current.log) rather than
+--- game chat. Safe to call from any stage, including on_load. Table
+--- arguments are serialized via inspect() instead of printing raw addresses.
+local function log_fn(...)
+    local parts = {}
+    local args = table.pack(...)
+    for i = 1, args.n do parts[i] = inspect(args[i]) end
+    log(table.concat(parts, "  "))
 end
 
 -- ---------------------------------------------------------------------------
@@ -165,6 +228,19 @@ end
 -- SECTION 2 – Execution engine
 -- ---------------------------------------------------------------------------
 
+--- Wire-connector ids for each (side, color) combination, so sandboxed code
+--- doesn't need to remember the raw defines.wire_connector_id.* names.
+local NETWORK_WIRE_IDS = {
+    input  = {
+        red   = defines.wire_connector_id.combinator_input_red,
+        green = defines.wire_connector_id.combinator_input_green,
+    },
+    output = {
+        red   = defines.wire_connector_id.combinator_output_red,
+        green = defines.wire_connector_id.combinator_output_green,
+    },
+}
+
 --- Build a sandboxed environment for user code.
 ---@return table sandbox
 ---@return table pending_outputs  (filled by set_output calls inside the chunk)
@@ -217,6 +293,55 @@ local function build_sandbox(entity, data, tick)
         )
     end
 
+    -- ---- Pretty-print straight to chat (tables rendered via inspect()) ----
+    local function dump(...)
+        local parts = {}
+        local args = table.pack(...)
+        for i = 1, args.n do parts[i] = inspect(args[i]) end
+        print_fn(table.concat(parts, "  "))
+    end
+
+    -- ---- Merged / per-wire signal lookup ----
+    -- get_signal(name)        -> red[name] + green[name] (what the combinator
+    --                            would see if both wires fed the same input)
+    -- get_signal(name, color) -> just that wire's value ("red" or "green")
+    local function get_signal(name, color)
+        if type(name) ~= "string" then
+            error("get_signal arg #1 (name) must be a string", 2)
+        end
+        if color == nil then
+            return (input_red[name] or 0) + (input_green[name] or 0)
+        elseif color == "red" then
+            return input_red[name] or 0
+        elseif color == "green" then
+            return input_green[name] or 0
+        else
+            error("get_signal arg #2 (color) must be \"red\", \"green\", or nil", 2)
+        end
+    end
+
+    -- ---- Direct circuit-network access, without needing to remember the
+    -- raw defines.wire_connector_id.* names ----
+    -- get_network("red")                 -> input red network
+    -- get_network("green", "output")     -> output green network
+    local function get_network(color, side)
+        side = side or "input"
+        local by_side = NETWORK_WIRE_IDS[side]
+        if not by_side then
+            error("get_network arg #2 (side) must be \"input\" or \"output\"", 2)
+        end
+        local wire_id = by_side[color]
+        if not wire_id then
+            error("get_network arg #1 (color) must be \"red\" or \"green\"", 2)
+        end
+        return entity.get_circuit_network(wire_id)
+    end
+
+    -- ---- Cancel any outputs queued so far this execution ----
+    local function clear_output()
+        for i = #pending_outputs, 1, -1 do pending_outputs[i] = nil end
+    end
+
     -- ---- Assemble sandbox ----
     local sandbox = {
         -- Safe standard library
@@ -250,12 +375,20 @@ local function build_sandbox(entity, data, tick)
         prototypes = prototypes,
         script     = make_script_wrapper(entity.unit_number),
         -- Lua Combinator API
-        entity     = entity,
-        tick       = tick,
-        red        = input_red,
-        green      = input_green,
-        set_output = set_output,
-        print      = print_fn,
+        entity        = entity,
+        tick          = tick,
+        red           = input_red,
+        green         = input_green,
+        set_output    = set_output,
+        clear_output  = clear_output,
+        get_signal    = get_signal,
+        get_network   = get_network,
+        print         = print_fn,
+        dump          = dump,
+        log           = log_fn,
+        inspect       = inspect,
+        clamp         = clamp,
+        round         = round,
         -- Persistent per-combinator storage
         storage    = data.storage,
     }
@@ -320,12 +453,20 @@ local function run_setup_pass(unit_number, data)
         prototypes = safe_game and prototypes or nil,
         script     = make_script_wrapper(unit_number),
         -- Combinator API stubs (no side-effects during setup pass)
-        entity     = (data.entity and data.entity.valid) and data.entity or nil,
-        tick       = 0,
-        red        = {},
-        green      = {},
-        set_output = function() end,
-        print      = function() end,
+        entity        = (data.entity and data.entity.valid) and data.entity or nil,
+        tick          = 0,
+        red           = {},
+        green         = {},
+        set_output    = function() end,
+        clear_output  = function() end,
+        get_signal    = function() return 0 end,
+        get_network   = function() return nil end,
+        print         = function() end,
+        dump          = function() end,
+        log           = log_fn,
+        inspect       = inspect,
+        clamp         = clamp,
+        round         = round,
         storage    = data.storage or {},
     }
     sandbox._ENV = sandbox
@@ -545,20 +686,31 @@ local GUI_NAME = "lua-combinator-gui"
 -- Default example shown when a newly placed combinator is first opened
 local EXAMPLE_CODE = [[-- ============================================================
 -- LUA COMBINATOR – quick reference
+-- Full reference with every function and more examples: API_REFERENCE.md
 -- ============================================================
 -- INPUTS  (read-only tables, populated each tick from wires)
 --   red   { [signal_name] = count }   signals on the red   input wire
 --   green { [signal_name] = count }   signals on the green input wire
 --   tick  (number)                    current game tick
+--   get_signal(name [, color])        red+green merged, or just one wire
 --
 -- OUTPUTS
 --   set_output(type, name, count)
 --       type : "item" | "fluid" | "virtual"
 --       name : e.g. "iron-plate", "water", "signal-A"
 --       count: integer (0 is silently ignored)
+--   clear_output()      discard everything queued so far this execution
+--
+-- NETWORKS
+--   get_network(color [, side])   raw LuaCircuitNetwork, no defines needed
+--       color: "red" | "green"    side: "input" (default) | "output"
 --
 -- UTILITIES
 --   print(...)          send a chat message (all players)
+--   dump(...)           like print(), but pretty-prints tables
+--   log(...)            write to factorio-current.log (not chat)
+--   inspect(value)       -> human-readable string for any value
+--   clamp(value, min, max)   round(value [, decimals])
 --   storage  {}         persistent per-combinator table (survives reloads)
 --
 -- FACTORIO API  (full runtime access)
@@ -608,6 +760,12 @@ local EXAMPLE_CODE = [[-- ======================================================
 --     set_output("virtual", "signal-R", force.rockets_launched)
 -- end)
 
+-- ── Example 5: merged-signal threshold with debug logging ────
+-- Average the red+green iron-plate count, clamp it, and log it.
+-- local iron = clamp(get_signal("iron-plate"), 0, 1000)
+-- log("iron-plate combined:", iron)
+-- set_output("item", "iron-plate", iron)
+
 -- ── Active code below (remove comments to enable) ────────────
 local iron = red["iron-plate"] or 0
 if iron > 0 then
@@ -640,10 +798,13 @@ local function open_gui(player, entity)
     -- ---- API hint ----
     local hint = frame.add{
         type    = "label",
-        caption = "tick  ·  red{}  ·  green{}  ·  set_output(type,name,count)  ·  storage{}  ·  print()  ·  game  ·  defines  ·  remote  ·  rendering  ·  prototypes",
+        caption = "tick · red{} · green{} · set_output() · get_signal() · get_network() · storage{} · print() · dump() · log() · inspect() · clamp() · round() · game · defines · remote · rendering · prototypes",
+        tooltip = "Full API reference: API_REFERENCE.md (in this mod's folder)",
     }
     hint.style.font_color     = {r = 0.55, g = 0.85, b = 1.0}
     hint.style.bottom_padding = 4
+    hint.style.single_line    = false
+    hint.style.maximal_width  = 524
 
     -- ---- Code text-box ----
     local code_box = frame.add{

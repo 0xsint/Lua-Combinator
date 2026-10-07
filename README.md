@@ -10,6 +10,12 @@ architecture, the sandbox API it exposes to user scripts, and — in
 particular — a line-by-line walkthrough of the most advanced bundled
 example, [`examples/example_rocket_monitor.lua`](/c:/Users/Admin/Desktop/LuaCode/lua-combinator/examples/example_rocket_monitor.lua).
 
+> 📖 **Looking for the scripting API itself (what you can call inside a
+> combinator's code box)?** See
+> [API_REFERENCE.md](/c:/Users/Admin/Desktop/LuaCode/lua-combinator/API_REFERENCE.md)
+> for the full function-by-function reference with examples. §3.7 below is
+> just a summary table in the context of the code review.
+
 ---
 
 ## 1. Project layout
@@ -19,6 +25,7 @@ example, [`examples/example_rocket_monitor.lua`](/c:/Users/Admin/Desktop/LuaCode
 | [info.json](/c:/Users/Admin/Desktop/LuaCode/lua-combinator/info.json) | Factorio mod manifest (name `lua-combinator`, v1.1.0, requires `base >= 2.0.0`, targets `factorio_version 2.0`). |
 | [data.lua](/c:/Users/Admin/Desktop/LuaCode/lua-combinator/data.lua) | Prototype stage: clones the vanilla decider-combinator entity, re-tints it teal/cyan, and registers the item, recipe, and technology. |
 | [control.lua](/c:/Users/Admin/Desktop/LuaCode/lua-combinator/control.lua) | Runtime stage (~900 lines): the sandboxed Lua execution engine, event dispatch shim, persistence, and the in-game code-editor GUI. |
+| [API_REFERENCE.md](/c:/Users/Admin/Desktop/LuaCode/lua-combinator/API_REFERENCE.md) | Full reference for the sandboxed scripting API exposed to combinator code (every function, its signature, and worked examples). |
 | [locale/en/locale.cfg](/c:/Users/Admin/Desktop/LuaCode/lua-combinator/locale/en/locale.cfg) | English localization strings for the entity, item, recipe, technology, and GUI. |
 | [examples/](/c:/Users/Admin/Desktop/LuaCode/lua-combinator/examples) | Four ready-to-paste example scripts demonstrating the API (see §4). |
 | [screenshot.png](/c:/Users/Admin/Desktop/LuaCode/lua-combinator/screenshot.png) | Promotional/portal screenshot. |
@@ -144,10 +151,18 @@ environment:
 2. Builds a `set_output(type, name, count)` closure that validates argument
    types, floors/defaults the count, silently **ignores zero-count calls**
    (so you don't need to manually "not set" unused signals), and appends to
-   a local `pending_outputs` accumulator.
+   a local `pending_outputs` accumulator; `clear_output()` empties that
+   same accumulator mid-script.
 3. Builds a `print(...)` closure that concatenates arguments and calls
-   `game.print` with a teal color — visible to every player in chat.
-4. Assembles the final `sandbox` table — this **is** the full API surface
+   `game.print` with a teal color — visible to every player in chat; `dump`
+   and `log` are thin variants that route tables through `inspect()`
+   (`serpent`-backed, deterministic) and write to the log file instead of
+   chat, respectively.
+4. Builds `get_signal(name [, color])` and `get_network(color [, side])` —
+   convenience wrappers over the `red`/`green` tables and
+   `entity.get_circuit_network(...)` so scripts don't have to re-derive
+   merged signal values or memorize `defines.wire_connector_id.*` names.
+5. Assembles the final `sandbox` table — this **is** the full API surface
    available to user code (see §3.5 below) — and sets `sandbox._ENV =
    sandbox` so that bare global reads/writes in the user's chunk resolve
    against this table instead of the real `_G`. This is the actual sandboxing
@@ -217,19 +232,36 @@ directly in the editor the first time a player opens one.
 
 ### 3.7 The sandbox API, summarized
 
-Every combinator script executes with this environment:
+Every combinator script executes with this environment (see
+[API_REFERENCE.md](/c:/Users/Admin/Desktop/LuaCode/lua-combinator/API_REFERENCE.md)
+for full details and examples on every entry below):
 
 | Name | Type | Description |
 |---|---|---|
 | `tick` | number | Current game tick at execution time. |
 | `red` / `green` | table | `{ [signal_name] = count }` read from the input red/green wires. |
 | `entity` | `LuaEntity` | The combinator entity itself (for `get_circuit_network`, `surface`, `position`, etc.). |
+| `get_signal(name [, color])` | function | Reads a signal's value — red+green combined by default, or just `"red"`/`"green"`. |
+| `get_network(color [, side])` | function | Returns the raw `LuaCircuitNetwork` for a wire (`side`: `"input"`\|`"output"`) without needing `defines.wire_connector_id.*`. |
 | `set_output(type, name, count)` | function | Queues an output signal (`type` ∈ `"item"`\|`"fluid"`\|`"virtual"`). Zero counts are a no-op. |
+| `clear_output()` | function | Discards everything queued so far this execution. |
 | `print(...)` | function | Sends a chat message to all players, teal-colored. |
+| `dump(...)` | function | Like `print(...)`, but table arguments are pretty-printed instead of showing as raw addresses. |
+| `log(...)` | function | Writes to `factorio-current.log` instead of chat; safe at every stage, including `on_load`. |
+| `inspect(value)` | function | Returns a deterministic, human-readable string for any value, tables included. |
+| `clamp(value, min, max)` / `round(value [, decimals])` | functions | Small numeric helpers for signal math. |
 | `storage` | table | Persistent per-combinator table; survives ticks, saves, and reloads (not clones). |
 | `script.on_event` / `on_nth_tick` / `on_init` / `on_load` | functions | Safe, multiplexed subset of the real `script` API. |
 | `game`, `defines`, `remote`, `rendering`, `prototypes` | — | Direct, unrestricted access to these Factorio runtime globals. |
 | `math`, `table`, `string`, `pairs`, `ipairs`, `next`, `select`, `type`, `tostring`, `tonumber`, `pcall`, `xpcall`, `error`, `assert`, `rawget`, `rawset`, `rawequal`, `rawlen`, `setmetatable`, `getmetatable`, `unpack` | — | Standard Lua building blocks. Notably **absent**: `io`, `os`, `require`, `load`/`loadstring`, `debug` — the usual suspects for sandbox escapes. |
+
+`get_signal`/`get_network` are thin convenience wrappers over `red`/`green`
+and `entity.get_circuit_network(...)` respectively — they don't expose any
+new capability, they just save scripts from re-deriving merged signal
+values or memorizing `defines.wire_connector_id.combinator_input_red`-style
+names. `inspect`/`dump`/`log` all route tables through `serpent` rather
+than Lua's own `tostring`, for the same determinism reason as
+`safe_error_string` above.
 
 Because `game`, `rendering`, and the full entity API are exposed
 unrestricted, this is a **trusted-author sandbox** (it stops accidental
@@ -324,8 +356,7 @@ or quantity without hunting through the logic body.
 ### 5.4 Scanning the input network for rocket silos
 
 ```lua
-local in_net = entity.get_circuit_network(
-    defines.wire_connector_id.combinator_input_red)
+local in_net = get_network("red")
 
 local silos_total    = 0
 local silos_ready    = 0
@@ -344,6 +375,10 @@ if in_net then
 
 Key design points:
 
+- `get_network("red")` is the sandbox's convenience wrapper (§3.7) around
+  `entity.get_circuit_network(defines.wire_connector_id.combinator_input_red)`
+  — same network object, just without needing to remember the
+  `defines.wire_connector_id.*` name for the combinator's own input wire.
 - **It doesn't just trust the raw signal values on the wire** — a rocket
   silo's own circuit output only reports things like rocket-parts count or
   launch status *as configured on the silo itself*, and multiple silos on
@@ -459,8 +494,7 @@ inconsistency worth fixing if this script is revised).
 ### 5.7 Scanning the output network and area
 
 ```lua
-local out_net = entity.get_circuit_network(
-    defines.wire_connector_id.combinator_output_red)
+local out_net = get_network("red", "output")
 if not out_net then return end
 
 local out_id = out_net.network_id

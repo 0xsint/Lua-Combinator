@@ -13,7 +13,9 @@ local CRIT_LOW   = 50             -- critical level (red, triggers speaker)
 local ALERT_GAP  = 300            -- ticks between repeated alerts (5 s)
 
 -- ---- Read chest ----
-local count = red[ITEM] or 0
+-- Chest is only wired to the red input, so get_signal(..., "red") is
+-- equivalent to red[ITEM] here, but doesn't need the "or 0" fallback.
+local count = get_signal(ITEM, "red")
 
 -- ---- Always output the live count as a virtual signal ----
 -- (pipe to a display combinator or lamp on the green wire)

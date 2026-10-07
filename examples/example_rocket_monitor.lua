@@ -27,8 +27,7 @@ local PAYLOAD_COUNT  = 20                  -- how many to request
 local PAYLOAD_SLOT   = 1                   -- chest slot to use
 
 -- ── Scan input (red) network for rocket silos ─────────────────
-local in_net = entity.get_circuit_network(
-    defines.wire_connector_id.combinator_input_red)
+local in_net = get_network("red")
 
 local silos_total    = 0
 local silos_ready    = 0
@@ -81,8 +80,7 @@ set_output("virtual", "signal-R",      silos_ready)
 set_output("virtual", "signal-T",      silos_total)
 
 -- ── Control entities on the output network ────────────────────
-local out_net = entity.get_circuit_network(
-    defines.wire_connector_id.combinator_output_red)
+local out_net = get_network("red", "output")
 if not out_net then return end
 
 local out_id = out_net.network_id
