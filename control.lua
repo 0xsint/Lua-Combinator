@@ -24,6 +24,15 @@
 --                           red+green combined; color is "red" or "green"
 --                           to read just that wire. Shorthand for
 --                           (red[name] or 0) + (green[name] or 0).
+--   get_output_signal(name [, color])
+--                           Same as get_signal, but reads the combinator's
+--                           OUTPUT wires instead of its input wires: the
+--                           live network state as of the start of this
+--                           execution (last tick's output, including
+--                           anything else feeding that wire), NOT values
+--                           queued by set_output calls made so far this
+--                           execution — those aren't applied until after
+--                           the code finishes running.
 --   get_network(color [, side])
 --                           Returns the raw LuaCircuitNetwork for a wire,
 --                           without needing defines.wire_connector_id.*.
@@ -146,14 +155,36 @@ local nth_tick_dispatch = {}   -- [n]         = { [unit_number] = fn }
 local registered_events = {}   -- [event_id] = true  (real Factorio handler exists)
 local registered_nth    = {}   -- [n]        = true
 
+-- The sandbox table used as _ENV when a combinator's script.on_event /
+-- script.on_nth_tick handlers were compiled (see run_setup_pass, SECTION 2).
+-- Handler closures resolve globals (get_signal, red, green, set_output, …)
+-- by looking them up in this SAME table every time they run, so refreshing
+-- its fields in place (via populate_runtime, SECTION 2) right before a
+-- dispatch makes those handlers see live circuit-network data instead of
+-- the inert stand-ins used while merely (re-)registering them.
+local combinator_sandboxes = {}   -- [unit_number] = sandbox table
+
+-- Implemented in SECTION 2; forward-declared so the dispatchers below (used
+-- by make_script_wrapper, defined earlier in this section) can call them.
+local populate_runtime
+local apply_outputs
+
 local function dispatch_event(event_id, event_data)
     local handlers = event_dispatch[event_id]
     if not handlers then return end
     for unit_number, fn in pairs(handlers) do
         local cdata = storage.combinators[unit_number]
         if cdata and cdata.entity and cdata.entity.valid then
+            local sandbox = combinator_sandboxes[unit_number]
+            local pending_outputs = sandbox and populate_runtime(sandbox, cdata.entity, cdata, game.tick)
             local ok, err = pcall(fn, event_data)
             if not ok then cdata.last_error = "Event error: " .. safe_error_string(err) end
+            if sandbox then
+                cdata.storage = sandbox.storage
+                if pending_outputs then
+                    apply_outputs(cdata.entity, pending_outputs, cdata.output_enabled ~= false)
+                end
+            end
         else
             handlers[unit_number] = nil
         end
@@ -166,8 +197,16 @@ local function dispatch_nth_tick(n, event_data)
     for unit_number, fn in pairs(handlers) do
         local cdata = storage.combinators[unit_number]
         if cdata and cdata.entity and cdata.entity.valid then
+            local sandbox = combinator_sandboxes[unit_number]
+            local pending_outputs = sandbox and populate_runtime(sandbox, cdata.entity, cdata, game.tick)
             local ok, err = pcall(fn, event_data)
             if not ok then cdata.last_error = "nth_tick error: " .. safe_error_string(err) end
+            if sandbox then
+                cdata.storage = sandbox.storage
+                if pending_outputs then
+                    apply_outputs(cdata.entity, pending_outputs, cdata.output_enabled ~= false)
+                end
+            end
         else
             handlers[unit_number] = nil
         end
@@ -241,10 +280,17 @@ local NETWORK_WIRE_IDS = {
     },
 }
 
---- Build a sandboxed environment for user code.
----@return table sandbox
+--- Fill in (or refresh) the entity/circuit-network-dependent parts of a
+--- sandbox: red/green inputs, get_signal/get_output_signal/get_network/
+--- set_output/clear_output, print/dump, tick, entity, and storage. Used both
+--- to populate a brand-new sandbox (the timer-driven execution path,
+--- build_sandbox below) and to refresh an EXISTING sandbox's fields in place
+--- right before invoking a script.on_event / script.on_nth_tick handler
+--- compiled against it (see dispatch_event / dispatch_nth_tick, SECTION 1),
+--- so those handlers always see live data instead of the inert stand-ins
+--- used while merely (re-)registering them in run_setup_pass.
 ---@return table pending_outputs  (filled by set_output calls inside the chunk)
-local function build_sandbox(entity, data, tick)
+function populate_runtime(sandbox, entity, data, tick)
     -- ---- Read circuit-network inputs ----
     local input_red   = {}
     local input_green = {}
@@ -263,9 +309,28 @@ local function build_sandbox(entity, data, tick)
         end
     end
 
-    -- ---- Output accumulator ----
-    local pending_outputs = {}
+    -- ---- Read circuit-network outputs (as of the start of this execution;
+    -- does NOT include set_output calls made so far this execution, since
+    -- those are only applied to the combinator's behavior afterwards) ----
+    local output_red   = {}
+    local output_green = {}
 
+    local out_red_net   = entity.get_circuit_network(defines.wire_connector_id.combinator_output_red)
+    local out_green_net = entity.get_circuit_network(defines.wire_connector_id.combinator_output_green)
+
+    if out_red_net and out_red_net.signals then
+        for _, sig in pairs(out_red_net.signals) do
+            output_red[sig.signal.name] = sig.count
+        end
+    end
+    if out_green_net and out_green_net.signals then
+        for _, sig in pairs(out_green_net.signals) do
+            output_green[sig.signal.name] = sig.count
+        end
+    end
+    local pending_outputs
+    pending_outputs = pending_outputs or {}
+    -- ---- Output accumulator ----
     local function set_output(sig_type, sig_name, count)
         if type(sig_type) ~= "string" then
             error("set_output arg #1 (type) must be a string", 2)
@@ -273,16 +338,18 @@ local function build_sandbox(entity, data, tick)
         if type(sig_name) ~= "string" then
             error("set_output arg #2 (name) must be a string", 2)
         end
-        local n = math.floor(tonumber(count) or 0)
+        local n = tonumber(count) or 0
         if n == 0 then return end   -- zero-count signals are a no-op
-        table.insert(pending_outputs, {
-            signal = {type = sig_type, name = sig_name},
-            count  = n,
-        })
+        local rng = {}
+        rng.seed = math.random(1, 429496)
+            table.insert(pending_outputs, {
+                signal = {type = sig_type, name = sig_name},
+                count  = n,
+                index = rng.seed,
+            })
     end
 
     -- ---- Print helper (chat visible to all players) ----
-    local unit_str = tostring(entity.unit_number)
     local function print_fn(...)
         local parts = {}
         local args = table.pack(...)
@@ -320,6 +387,26 @@ local function build_sandbox(entity, data, tick)
         end
     end
 
+    -- ---- Merged / per-wire OUTPUT signal lookup ----
+    -- Mirrors get_signal, but reads the combinator's output wires instead
+    -- of its input wires (see the note above output_red/output_green).
+    -- get_output_signal(name)        -> output_red[name] + output_green[name]
+    -- get_output_signal(name, color) -> just that output wire's value
+    local function get_output_signal(name, color)
+        if type(name) ~= "string" then
+            error("get_output_signal arg #1 (name) must be a string", 2)
+        end
+        if color == nil then
+            return (output_red[name] or 0) + (output_green[name] or 0)
+        elseif color == "red" then
+            return output_red[name] or 0
+        elseif color == "green" then
+            return output_green[name] or 0
+        else
+            error("get_output_signal arg #2 (color) must be \"red\", \"green\", or nil", 2)
+        end
+    end
+
     -- ---- Direct circuit-network access, without needing to remember the
     -- raw defines.wire_connector_id.* names ----
     -- get_network("red")                 -> input red network
@@ -339,10 +426,39 @@ local function build_sandbox(entity, data, tick)
 
     -- ---- Cancel any outputs queued so far this execution ----
     local function clear_output()
-        for i = #pending_outputs, 1, -1 do pending_outputs[i] = nil end
+        log_fn("clearing outputs")
+        for i, po in pairs(entity.get_control_behavior().parameters.outputs) do
+            log_fn("pending_outputs before removal", pending_outputs)
+            log_fn("current output", po)
+            entity.get_control_behavior().remove_output(i)
+            log_fn("removed output", i)
+            pending_outputs[i] = nil
+        end
     end
 
-    -- ---- Assemble sandbox ----
+    sandbox.entity            = entity
+    sandbox.tick              = tick
+    sandbox.red               = input_red
+    sandbox.green             = input_green
+    sandbox.set_output        = set_output
+    sandbox.clear_output      = clear_output
+    sandbox.get_signal        = get_signal
+    sandbox.get_output_signal = get_output_signal
+    sandbox.get_network       = get_network
+    sandbox.print             = print_fn
+    sandbox.dump              = dump
+    -- Persistent per-combinator storage
+    sandbox.storage           = data.storage
+
+    return pending_outputs
+end
+
+--- Build a sandboxed environment for user code (the timer-driven execution
+--- path). Populates the static/always-available parts, then delegates the
+--- entity/circuit-network-dependent parts to populate_runtime.
+---@return table sandbox
+---@return table pending_outputs  (filled by set_output calls inside the chunk)
+local function build_sandbox(entity, data, tick)
     local sandbox = {
         -- Safe standard library
         math       = math,
@@ -374,59 +490,79 @@ local function build_sandbox(entity, data, tick)
         rendering  = rendering,
         prototypes = prototypes,
         script     = make_script_wrapper(entity.unit_number),
-        -- Lua Combinator API
-        entity        = entity,
-        tick          = tick,
-        red           = input_red,
-        green         = input_green,
-        set_output    = set_output,
-        clear_output  = clear_output,
-        get_signal    = get_signal,
-        get_network   = get_network,
-        print         = print_fn,
-        dump          = dump,
-        log           = log_fn,
-        inspect       = inspect,
-        clamp         = clamp,
-        round         = round,
-        -- Persistent per-combinator storage
-        storage    = data.storage,
+        log        = log_fn,
+        inspect    = inspect,
+        clamp      = clamp,
+        round      = round,
     }
     -- Self-referential _ENV so bare globals resolve in our sandbox
     sandbox._ENV = sandbox
 
+    local pending_outputs = populate_runtime(sandbox, entity, data, tick)
     return sandbox, pending_outputs
 end
 
 --- Apply pending outputs to the decider-combinator behaviour.
---- Clears any previous state, sets an always-true condition, then adds
---- each output individually using add_condition / add_output.
-local function apply_outputs(entity, pending_outputs, enabled)
+--- Replaces the whole `parameters` structure in one atomic assignment
+--- (clearing it to nil and then using add_condition/add_output leaves a
+--- leftover default condition/output from the entity's template behind,
+--- which prevents the combinator from ever outputting anything).
+function apply_outputs(entity, pending_outputs, enabled)
     local behavior = entity.get_or_create_control_behavior()
 
-    -- Always clear first so stale signals don't persist
-    behavior.parameters = nil
-
-    if not enabled or #pending_outputs == 0 then return end
-
-    -- Always-true condition: blank signal (value 0) = constant 0 → 0 = 0
-    -- No entity emits a blank/nameless signal, so this is permanently true.
-    behavior.add_condition({ comparator = "=" })
-
-    -- Add each output as a fixed constant value
-    for _, sig in ipairs(pending_outputs) do
-        behavior.add_output({
-            signal               = { type = sig.signal.type, name = sig.signal.name },
-            copy_count_from_input = false,
-            constant             = sig.count,
-        })
+    if not enabled or #pending_outputs == 0 then
+        behavior.parameters = nil
+        return
+    end
+    behavior.add_condition({
+        comparator    = "=",
+    })
+    for index, po in ipairs(pending_outputs) do
+        log_fn("processing pending output", po.signal.name, po.count, po.signal.type, po.index)
+        log_fn("signal last tick", po.signal.name, po.count, po.signal.type)
+        log_fn("Getting output for pending output", po.signal.name, po.count, po.signal.type, po.index)
+        local out = behavior.get_output(index)
+        if out then
+            if out.signal == nil then
+                goto continue
+            end
+            if out.signal.name == po.signal.name and out.signal.type == po.signal.type then
+                out.count = po.count
+            end
+        end
+        ::continue::
+        if po.index  then
+            behavior.add_output({
+                signal                = { type = po.signal.type, name = po.signal.name },
+                copy_count_from_input = false,
+                constant              = po.count,
+            })
+        elseif not po.index then
+            log_fn("no index for pending output", po.signal.name, po.count, po.signal.type)
+            local rng = {}
+            rng.seed = math.random(1, 429496)
+            po.index = rng.seed
+            log_fn("assigned new index for pending output", po.signal.name, po.count, po.signal.type, po.index)
+            behavior.add_output({
+                signal                = { type = po.signal.type, name = po.signal.name },
+                copy_count_from_input = false,
+                constant              = po.count,
+            })
+        end
     end
 end
 
 --- Run user code once in a stripped sandbox to (re-)register any
 --- script.on_event / script.on_nth_tick handlers declared in the code.
 --- Called on game load, code apply, and entity clone.
---- set_output is a no-op; nothing is written to the entity.
+--- The top-level code itself runs against inert stand-ins (set_output is a
+--- no-op, storage is a throwaway table, …) so merely re-registering handlers
+--- never touches the entity or persisted storage — importantly, this keeps
+--- on_load side-effect-free even for code that unconditionally mutates
+--- storage at the top level (Factorio forbids storage changes in on_load).
+--- The sandbox itself is kept around (combinator_sandboxes) so that
+--- dispatch_event / dispatch_nth_tick can refresh its fields with live data
+--- right before actually invoking a registered handler.
 local function run_setup_pass(unit_number, data)
     if not (data.code and data.code ~= "") then return end
 
@@ -452,7 +588,8 @@ local function run_setup_pass(unit_number, data)
         rendering  = safe_game and rendering  or nil,
         prototypes = safe_game and prototypes or nil,
         script     = make_script_wrapper(unit_number),
-        -- Combinator API stubs (no side-effects during setup pass)
+        -- Combinator API stubs (no side-effects during setup pass; refreshed
+        -- with live data by populate_runtime before real handler dispatch)
         entity        = (data.entity and data.entity.valid) and data.entity or nil,
         tick          = 0,
         red           = {},
@@ -460,6 +597,7 @@ local function run_setup_pass(unit_number, data)
         set_output    = function() end,
         clear_output  = function() end,
         get_signal    = function() return 0 end,
+        get_output_signal = function() return 0 end,
         get_network   = function() return nil end,
         print         = function() end,
         dump          = function() end,
@@ -467,9 +605,17 @@ local function run_setup_pass(unit_number, data)
         inspect       = inspect,
         clamp         = clamp,
         round         = round,
-        storage    = data.storage or {},
+        -- Throwaway table, NOT data.storage: top-level code that mutates
+        -- storage unconditionally (a documented pattern, see EXAMPLE_CODE)
+        -- must not touch real persisted storage here, since this pass also
+        -- runs during on_load, where Factorio forbids storage changes.
+        storage       = {},
     }
     sandbox._ENV = sandbox
+
+    -- Keep the sandbox reachable so dispatch_event / dispatch_nth_tick can
+    -- refresh its fields with live data before invoking a registered handler.
+    combinator_sandboxes[unit_number] = sandbox
 
     local fn = load(data.code, "@lua-combinator-setup#" .. unit_number, "t", sandbox)
     if fn then pcall(fn) end  -- errors during setup pass are silently discarded
@@ -568,6 +714,9 @@ end
 
 local function unregister_combinator(entity)
     storage.combinators[entity.unit_number] = nil
+    combinator_sandboxes[entity.unit_number] = nil
+    for _, handlers in pairs(event_dispatch)    do handlers[entity.unit_number] = nil end
+    for _, handlers in pairs(nth_tick_dispatch) do handlers[entity.unit_number] = nil end
 end
 
 -- ---- Placement ----
@@ -663,11 +812,13 @@ script.on_event(defines.events.on_tick, function(event)
                             local green_box = find_child(frame, "lua-combinator-green-signals")
                             if red_box then
                                 red_box.text = format_signals(
-                                    entity.get_circuit_network(defines.wire_connector_id.combinator_input_red))
+                                    entity.get_circuit_network(defines.wire_connector_id.combinator_input_red)) .. "\n OUTPUTS \n" .. format_signals(
+                                    entity.get_circuit_network(defines.wire_connector_id.combinator_output_red))
                             end
                             if green_box then
                                 green_box.text = format_signals(
-                                    entity.get_circuit_network(defines.wire_connector_id.combinator_input_green))
+                                    entity.get_circuit_network(defines.wire_connector_id.combinator_input_green)) .. "\n OUTPUTS \n" .. format_signals(
+                                    entity.get_circuit_network(defines.wire_connector_id.combinator_output_green))
                             end
                         end
                     end
@@ -700,6 +851,9 @@ local EXAMPLE_CODE = [[-- ======================================================
 --       name : e.g. "iron-plate", "water", "signal-A"
 --       count: integer (0 is silently ignored)
 --   clear_output()      discard everything queued so far this execution
+--   get_output_signal(name [, color])
+--       reads the OUTPUT wires instead of the input wires (last tick's
+--       output network state, not this execution's pending set_output calls)
 --
 -- NETWORKS
 --   get_network(color [, side])   raw LuaCircuitNetwork, no defines needed
@@ -744,6 +898,11 @@ local EXAMPLE_CODE = [[-- ======================================================
 -- Increment a persistent counter every execution and output it.
 -- storage.n = (storage.n or 0) + 1
 -- set_output("virtual", "signal-C", storage.n)
+
+-- ── Example 2b: Lua Combinator virtual signal ────────────────
+-- Send this mod's signal to a connected combinator. There, read it with:
+-- local enabled = get_signal("signal-lua-combinator") > 0
+-- set_output("virtual", "signal-lua-combinator", 1)
 
 -- ── Example 3: event-driven (uncheck Timer in settings) ──────
 -- Announce when any player joins the game.
@@ -798,7 +957,7 @@ local function open_gui(player, entity)
     -- ---- API hint ----
     local hint = frame.add{
         type    = "label",
-        caption = "tick · red{} · green{} · set_output() · get_signal() · get_network() · storage{} · print() · dump() · log() · inspect() · clamp() · round() · game · defines · remote · rendering · prototypes",
+        caption = "tick · red{} · green{} · set_output() · get_signal() · get_output_signal() · get_network() · storage{} · print() · dump() · log() · inspect() · clamp() · round() · game · defines · remote · rendering · prototypes",
         tooltip = "Full API reference: API_REFERENCE.md (in this mod's folder)",
     }
     hint.style.font_color     = {r = 0.55, g = 0.85, b = 1.0}
@@ -879,7 +1038,7 @@ local function open_gui(player, entity)
     local red_box = red_col.add{
         type      = "text-box",
         name      = "lua-combinator-red-signals",
-        text      = format_signals(entity.get_circuit_network(defines.wire_connector_id.combinator_input_red)),
+        text      = format_signals(entity.get_circuit_network(defines.wire_connector_id.combinator_input_red)) .. "\n OUTPUTS \n" .. format_signals(entity.get_circuit_network(defines.wire_connector_id.combinator_output_red)),
     }
     red_box.read_only       = true
     red_box.style.width     = 257
@@ -892,7 +1051,7 @@ local function open_gui(player, entity)
     local green_box = green_col.add{
         type      = "text-box",
         name      = "lua-combinator-green-signals",
-        text      = format_signals(entity.get_circuit_network(defines.wire_connector_id.combinator_input_green)),
+        text      = format_signals(entity.get_circuit_network(defines.wire_connector_id.combinator_input_green)) .. "\n OUTPUTS \n" .. format_signals(entity.get_circuit_network(defines.wire_connector_id.combinator_output_green)),
     }
     green_box.read_only       = true
     green_box.style.width     = 257

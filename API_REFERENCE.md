@@ -70,6 +70,7 @@ calling `entity.get_circuit_network(...)` directly would.
 |---|---|---|
 | `set_output(type, name, count)` | `function` | Queues an output signal. |
 | `clear_output()` | `function` | Discards everything queued so far this execution. |
+| `get_output_signal(name [, color])` | `function` | Reads a signal's value from the output wires instead of the input wires. See below. |
 
 ### `set_output(type, name, count)`
 
@@ -77,10 +78,13 @@ calling `entity.get_circuit_network(...)` directly would.
 - `name` — signal name string (e.g. `"iron-plate"`, `"water"`, `"signal-A"`).
 - `count` — integer; non-integers are floored. **A count of `0` is a
   silent no-op** — you don't need to manually skip unused signals.
+- Returns `nil`. `set_output` queues a circuit output as a side effect; it
+  does not return the signal value.
 
 ```lua
 set_output("item", "iron-plate", 42)
 set_output("virtual", "signal-A", get_signal("copper-plate"))
+set_output("virtual", "signal-lua-combinator", 1)
 ```
 
 ### `clear_output()`
@@ -96,6 +100,50 @@ if some_condition then
     set_output("virtual", "signal-B", 1)
 end
 ```
+
+### `get_output_signal(name [, color])`
+
+Same shape as `get_signal`, but reads the combinator's **output** wires
+(`combinator_output_red` / `combinator_output_green`) instead of its input
+wires. Useful for seeing what's actually on the output network — this
+combinator's own previous output plus anything else feeding that wire —
+without needing to connect a second combinator just to read it back.
+
+- `get_output_signal(name)` — returns the red+green output combined.
+- `get_output_signal(name, "red")` / `get_output_signal(name, "green")` —
+  just that output wire's value.
+
+```lua
+local iron_out = get_output_signal("iron-plate")
+```
+
+The values reflect the circuit network's state as of the *start* of this
+execution (i.e. last execution's applied output). Signals queued with
+`set_output` earlier in the **same** execution are not yet visible through
+`get_output_signal`, since `set_output` only queues them — they're written
+to the combinator's behavior after the script finishes running.
+
+### Lua Combinator virtual signal
+
+The mod registers `signal-lua-combinator`, a virtual signal shown in the
+circuit-signal picker as **Lua Combinator**. Emit it like any other virtual
+signal:
+
+```lua
+set_output("virtual", "signal-lua-combinator", 1)
+```
+
+Read it with `get_signal` from a combinator whose input is connected to that
+output:
+
+```lua
+local active = get_signal("signal-lua-combinator") > 0
+```
+
+`get_signal` reads input networks only, so an output queued with
+`set_output` is not available through `get_signal` until it reaches a
+connected combinator on a later circuit-network update. To read this
+combinator's own output directly, use `get_output_signal` instead.
 
 ---
 

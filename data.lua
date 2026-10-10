@@ -45,6 +45,18 @@ local item = {
     stack_size    = 50,
 }
 
+-- ---- Virtual signal -------------------------------------------------------
+-- A mod-owned signal that can be emitted with set_output() and read from a
+-- connected circuit network with get_signal().
+local virtual_signal = {
+    type      = "virtual-signal",
+    name      = "signal-lua-combinator",
+    icon      = "__base__/graphics/icons/decider-combinator.png",
+    icon_size = 64,
+    subgroup  = "virtual-signal",
+    order     = "z[lua-combinator]",
+}
+
 -- ---- Recipe --------------------------------------------------------------
 local recipe = {
     type    = "recipe",
@@ -82,4 +94,4 @@ local technology = {
 }
 
 -- ---- Register everything -------------------------------------------------
-data:extend{entity, item, recipe, technology}
+data:extend{entity, item, virtual_signal, recipe, technology}

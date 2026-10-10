@@ -1,13 +1,3 @@
--- ============================================================
--- Rocket Ready Monitor + Payload Loader
--- ============================================================
--- WIRING:
---   Rocket silo(s)                 → INPUT  wire (red, top)
---   Requester chest + lamps/       → OUTPUT wire (bottom)
---     speakers
---
--- The requester chest on Vulcanus continuously requests PAYLOAD_COUNT
--- of PAYLOAD_ITEM. Lamps and speakers still indicate rocket readiness.
 --
 -- The request is cleared on other surfaces.
 --
@@ -18,8 +8,11 @@
 --
 -- Recommended interval: 60 ticks
 -- ============================================================
-
 if not entity then return end
+
+
+clear_output() -- clear output at beginning
+
 
 -- ── Configuration ─────────────────────────────────────────────
 local PAYLOAD_ITEM   = "big-mining-drill"  -- item name to request
@@ -27,12 +20,11 @@ local PAYLOAD_COUNT  = 20                  -- how many to request
 local PAYLOAD_SLOT   = 1                   -- chest slot to use
 
 -- ── Scan input (red) network for rocket silos ─────────────────
-local in_net = get_network("red")
-
+local in_net = get_network("green")
 local silos_total    = 0
 local silos_ready    = 0
 local silos_building = 0
-
+local all_ready = false
 if in_net then
     local all_silos = entity.surface.find_entities_filtered{
         name  = "rocket-silo",
@@ -45,8 +37,7 @@ if in_net then
         -- Rocket silos use circuit_red/circuit_green for their wire connectors.
         local connected = false
         for _, cid in ipairs({
-            defines.wire_connector_id.circuit_red,
-            defines.wire_connector_id.circuit_green,
+            defines.wire_connector_id.combinator_input_green,
         }) do
             local silo_net = silo.get_circuit_network(cid)
             if silo_net and silo_net.network_id == in_net.network_id then
@@ -72,13 +63,27 @@ end
 local all_ready = silos_total > 0 and silos_ready == silos_total
 local any_ready = silos_ready > 0
 local building  = silos_building > 0 or (any_ready and not all_ready)
-
 -- ── Emit circuit signals ──────────────────────────────────────
-set_output("virtual", "signal-green",  all_ready and 1 or 0)
-set_output("virtual", "signal-yellow", building  and 1 or 0)
-set_output("virtual", "signal-R",      silos_ready)
-set_output("virtual", "signal-T",      silos_total)
+--[[if all_ready then
+   set_output("virtual", "signal-green", 1)
+else
+   set_output("virtual", "signal-green", 0)
+end
+if building then
 
+    set_output("virtual", "signal-yellow", 1)
+else
+   set_output("virtual", "signal-yellow", 0)
+end]]
+set_output("virtual", "signal-green", all_ready and 1 or 0)
+set_output("virtual", "signal-yellow", building and 1 or 0)
+
+if get_output_signal("signal-green") == 1 then
+   dump("All silos are ready!")
+end
+if get_output_signal("signal-yellow") == 1 then
+   dump("Silos building!")
+end
 -- ── Control entities on the output network ────────────────────
 local out_net = get_network("red", "output")
 if not out_net then return end
@@ -97,7 +102,7 @@ for _, ent in pairs(entity.surface.find_entities_filtered{ area = area }) do
     -- Confirm entity is on our output network
     local on_out = false
     for _, cid in ipairs({
-        defines.wire_connector_id.circuit_red,
+        defines.wire_connector_id.combinator_input_red,
     }) do
         local ok, net = pcall(ent.get_circuit_network, cid)
         if ok and net and net.network_id == 947 then
@@ -140,6 +145,7 @@ for _, ent in pairs(entity.surface.find_entities_filtered{ area = area }) do
                 value = { type = "item", name = PAYLOAD_ITEM, quality = "normal"},
                 min = PAYLOAD_COUNT, max = PAYLOAD_COUNT
             })
+            dump("Loading into bay")
         else
             section.clear_slot(PAYLOAD_SLOT)
         end
