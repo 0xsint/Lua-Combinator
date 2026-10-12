@@ -64,8 +64,7 @@ local recipe = {
     enabled = false,
     ingredients = {
         {type = "item", name = "constant-combinator", amount = 1},
-        {type = "item", name = "advanced-circuit",    amount = 3},
-        {type = "item", name = "processing-unit",     amount = 1},
+        {type = "item", name = "advanced-circuit",    amount = 1},
     },
     results = {
         {type = "item", name = "lua-combinator", amount = 1},
