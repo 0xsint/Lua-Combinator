@@ -1,0 +1,28 @@
+---------------------------------------------------------------------------------------------------
+Version: 3.0.0
+Date: 2026-11-06
+  Major Features:
+    - In-game example browser with 40+ example scripts (basics, logistics, power, world, events, wireless, advanced).
+    - Wireless channels (transmit/receive) and a `shared` table common to every Lua Combinator.
+    - State helpers: rising_edge, falling_edge, changed, hysteresis, latch, every, delay, average, ema, rate, pid.
+    - New output helpers: out, add_output, set_outputs, forward, get_outputs; quality-aware signals.
+    - alert(), label() and rich_text() for talking to players.
+    - Code and settings are stored in blueprints and copied with copy/paste settings.
+    - Remote interface "lua-combinator" for managing combinators in bulk.
+    - Mod settings: default interval, error marker, error chat announcements.
+  Optimizations:
+    - Tick-bucket scheduler: only combinators due on a tick are visited.
+    - Scripts are compiled once and re-used; inputs are read only when used.
+    - Outputs are written to the entity only when they change.
+  Bugfixes:
+    - Fixed output signals piling up on every run.
+    - Fixed clear_output() modifying the entity instead of the queued outputs.
+    - Removed math.random from the output path.
+    - Scripts listening to on_tick, build or GUI events no longer replace the mod's own handlers.
+    - Event registrations are removed when no combinator needs them, so they always match what on_load rebuilds.
+    - Global variables no longer leak between runs.
+  Changes:
+    - The code is split into modules under scripts/.
+    - set_output with a count of 0 now removes a signal set earlier in the same run.
+    - Event handlers start from the current outputs and only write them when changed.
+    - During handler registration game and entity are nil, on Apply as well as on load.

@@ -28,17 +28,22 @@ local TINT = {r = 0.15, g = 0.90, b = 0.85, a = 1.0}
 apply_tint(entity.sprites,               TINT)
 apply_tint(entity.activity_led_sprites,  TINT)
 
+-- Tinted icon (used by the entity, item and virtual signal)
+local ICONS = {
+    {
+        icon      = "__base__/graphics/icons/decider-combinator.png",
+        icon_size = 64,
+        tint      = TINT,
+    }
+}
+entity.icon  = nil
+entity.icons = ICONS
+
 -- ---- Item ----------------------------------------------------------------
 local item = {
     type        = "item",
     name        = "lua-combinator",
-    icons = {
-        {
-            icon      = "__base__/graphics/icons/decider-combinator.png",
-            icon_size = 64,
-            tint      = TINT,
-        }
-    },
+    icons         = ICONS,
     subgroup      = "circuit-network",
     order         = "c[combinators]-d[lua-combinator]",
     place_result  = "lua-combinator",
@@ -51,8 +56,7 @@ local item = {
 local virtual_signal = {
     type      = "virtual-signal",
     name      = "signal-lua-combinator",
-    icon      = "__base__/graphics/icons/decider-combinator.png",
-    icon_size = 64,
+    icons     = ICONS,
     subgroup  = "virtual-signal",
     order     = "z[lua-combinator]",
 }
