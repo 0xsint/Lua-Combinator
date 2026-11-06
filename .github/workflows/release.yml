@@ -1,8 +1,14 @@
 name: Release
 
+# Publishes dist/<name>_<version>.zip as a GitHub release.
+#  - Push a tag "v<version>" (must match info.json), or
+#  - run this workflow manually (Actions tab -> Release -> Run workflow);
+#    it creates the tag v<version> from info.json on the selected commit.
+
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -17,10 +23,12 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Check tag matches info.json version
+      - name: Read version
+        id: version
         run: |
           version=$(python3 -c "import json; print(json.load(open('info.json'))['version'])")
-          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+          if [ "$GITHUB_REF_TYPE" = "tag" ] && [ "v$version" != "$GITHUB_REF_NAME" ]; then
             echo "Tag $GITHUB_REF_NAME does not match info.json version $version" >&2
             exit 1
           fi
@@ -36,5 +44,7 @@ jobs:
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          target_commitish: ${{ github.sha }}
           files: dist/*.zip
           generate_release_notes: true
