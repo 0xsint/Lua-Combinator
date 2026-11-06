@@ -1,9 +1,9 @@
 {
   "name": "lua-combinator",
-  "version": "2.3.0",
+  "version": "3.0.0",
   "title": "Lua Combinator",
   "author": "awhlina",
-  "description": "Adds a programmable Lua Combinator to the circuit network. Write Lua code to process red/green wire signals, persist state between ticks, and output arbitrary signals.",
+  "description": "Adds a programmable Lua Combinator to the circuit network. Write Lua to process red/green wire signals, react to game events, talk over wireless channels and drive outputs. Includes 40+ built-in example scripts.",
   "dependencies": [
     "base >= 2.0.0"
   ],

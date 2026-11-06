@@ -1,164 +1,98 @@
 # Lua Combinator
 
-Lua Combinator is a Factorio 2.0 mod that adds a programmable circuit-network
-combinator. Place it, open it, write Lua, and use the script to read circuit
-inputs and drive circuit outputs.
+A Factorio 2.0 mod that adds a programmable combinator. Place it, open it,
+write Lua: read the red and green wires, keep state, react to game events,
+send signals across the map without wires, and drive the output.
 
-The mod targets Factorio 2.0 and depends only on `base >= 2.0.0`; see
-[`info.json`](./info.json).
+![Lua Combinator editor](./screenshot.png)
 
-## Using the combinator
+- **40+ built-in examples** in an in-game browser — clocks, memory cells,
+  train limits, mall recipe selection, PID control, enemy radar, wireless
+  links, a Game of Life display and more. See [EXAMPLES.md](./EXAMPLES.md).
+- **A real API**: quality-aware inputs and outputs, edge detection,
+  hysteresis, moving averages, PID, alerts, floating labels, wireless
+  channels, shared memory. See [API_REFERENCE.md](./API_REFERENCE.md).
+- **Event-driven scripts**: `script.on_event` / `on_nth_tick` for any game
+  event, with any number of combinators listening.
+- **Built to scale**: only combinators that are due on a tick are touched,
+  code is compiled once, inputs are read only when used, and outputs are
+  written only when they change.
+- **Blueprint-friendly**: code and settings travel with blueprints,
+  copy/paste settings and cloning.
 
-1. Research **Lua Combinator** to unlock its recipe.
-2. Place a Lua Combinator and connect its input/output circuit wires.
-3. Open the entity to edit its Lua code.
-4. Set the execution interval, or disable **Timer** to run only registered
-   event handlers.
-5. Select **Apply** to save the code, register its event handlers, and run it
-   immediately. **Run Now** executes the current editor contents without
-   waiting for the interval.
+## Quick start
 
-The editor also displays the red and green input signals, refreshed every
-20 ticks, and any compile or runtime error from the last execution.
+1. Research **Lua Combinator** (after *Circuit network*).
+2. Place one and wire its inputs and outputs like any combinator.
+3. Open it. Pick an example from the **Examples** list and press **Load**,
+   or write your own:
 
-New combinators have these defaults:
+   ```lua
+   local iron = get_signal("iron-plate")
+   if iron < 100 then
+       out("signal-red", 1)
+       alert(rich_text("iron-plate") .. " is low")
+   end
+   ```
 
-| Setting | Default |
-|---|---:|
-| Timer interval | 20 ticks |
-| Timer | Enabled |
-| Circuit output | Enabled |
-| Persistent script state | Empty table |
+4. Press **Apply**. The code runs every *N* ticks (the interval next to
+   **Timer**). Uncheck **Timer** for scripts that should only react to events.
 
-Cloning a Lua Combinator preserves its code, interval, and checkbox settings,
-but starts it with a new empty script-state table.
+The editor shows live input and output signals, your script's `storage`,
+run/error counters, and an API cheat sheet. Errors appear with line numbers
+and a warning icon over the combinator; the game keeps running.
 
-## Script example
+## Mod settings
 
-This forwards the red-wire iron-plate count:
+| Setting | Default | |
+|---|---:|---|
+| Default interval | 20 ticks | Interval for newly placed combinators. |
+| Show error marker | on | Warning icon above failing combinators. |
+| Announce script errors in chat | off | Message with a map link when a script starts failing. |
 
-```lua
-local iron = get_signal("iron-plate", "red")
-if iron > 0 then
-    set_output("item", "iron-plate", iron)
-end
+## How it works
+
+| File | Purpose |
+|---|---|
+| [`control.lua`](./control.lua) | Entry point: wires Factorio events to the modules below. |
+| [`scripts/scheduler.lua`](./scripts/scheduler.lua) | Tick buckets. Each combinator sits in the bucket for the tick it next runs on, so per-tick cost depends on how many are *due*, not how many exist. |
+| [`scripts/sandbox.lua`](./scripts/sandbox.lua) | The script API, compile cache and execution modes. Code is compiled once as `local _ENV = ...; <code>` and called with a fresh environment each run. |
+| [`scripts/outputs.lua`](./scripts/outputs.lua) | Output buffers → decider combinator parameters, written only when changed. |
+| [`scripts/events.lua`](./scripts/events.lua) | One event multiplexer for the mod and every script, kept in sync with what `on_load` rebuilds so multiplayer joins never see mismatched handlers. |
+| [`scripts/registry.lua`](./scripts/registry.lua) | Combinator records, blueprints, paste, cloning, migration, error markers. |
+| [`scripts/signals.lua`](./scripts/signals.lua) | Reading circuit networks, signal keys and types, rich text. |
+| [`scripts/gui.lua`](./scripts/gui.lua) | The editor window and example browser. |
+| [`scripts/remote.lua`](./scripts/remote.lua) | `remote.call("lua-combinator", ...)` interface for bulk management. |
+| [`examples/`](./examples) | Built-in examples; [`examples/index.lua`](./examples/index.lua) is the catalogue. |
+| [`data.lua`](./data.lua), [`settings.lua`](./settings.lua) | Prototypes (a tinted copy of the decider combinator, item, signal, recipe, technology) and mod settings. |
+| [`tests/`](./tests) | Headless test suite against a mock Factorio runtime. |
+
+The combinator is a re-skinned decider combinator: its outputs are written
+as constant outputs behind an always-true condition.
+
+**Recipe:** 1 constant combinator + 1 advanced circuit.
+**Technology:** requires *Circuit network*; 150 × automation + logistic
+science, 30 s each.
+
+### Determinism
+
+Factorio multiplayer needs every peer to compute exactly the same thing.
+The runtime keeps all script state in `storage`, gives each timer run a
+fresh environment, runs handlers in a fixed order, serializes error values
+deterministically, and runs the handler-registration pass with no access to
+the game so it registers the same handlers on **Apply** and after a load.
+
+## Development
+
+The test suite loads the real `control.lua` against a mock of the Factorio
+API and runs every example:
+
+```bash
+pip install lupa
 ```
 
-This emits the virtual signal supplied by this mod:
-
-```lua
-set_output("virtual", "signal-lua-combinator", 1)
+```bash
+python3 tests/run.py
 ```
 
-A Lua Combinator connected to that output can read it on its input:
-
-```lua
-local active = get_signal("signal-lua-combinator") > 0
-```
-
-`get_signal` reads input networks. An output queued with `set_output` is not
-readable by `get_signal` in the same execution; connect it to another
-combinator and wait for the circuit network to update. To read this
-combinator's own output directly (as of the start of the current
-execution), use `get_output_signal` instead.
-
-## Script API
-
-The complete reference, including argument validation and worked examples, is
-in [`API_REFERENCE.md`](./API_REFERENCE.md). The runtime in
-[`control.lua`](./control.lua) exposes the following values to combinator
-scripts.
-
-| Name | Behavior |
-|---|---|
-| `tick` | Current game tick. |
-| `red`, `green` | Input tables indexed by signal name. |
-| `get_signal(name [, color])` | Reads a signal from both input wires, or just `"red"` or `"green"`. |
-| `get_output_signal(name [, color])` | Reads a signal from both output wires, or just `"red"` or `"green"`. |
-| `get_network(color [, side])` | Returns a raw circuit network for `"red"`/`"green"` and optional `"input"`/`"output"` side. |
-| `set_output(type, name, count)` | Queues an item, fluid, or virtual output signal. Counts are floored; zero does not queue a signal. |
-| `clear_output()` | Removes all signals queued during the current execution. |
-| `storage` | Persistent table scoped to this combinator. |
-| `print(...)`, `dump(...)`, `log(...)`, `inspect(value)` | Chat and log helpers; the table-aware helpers format tables deterministically. |
-| `clamp(value, min, max)`, `round(value [, decimals])` | Numeric helpers. |
-| `script.on_event(...)`, `script.on_nth_tick(...)` | Per-combinator event handlers dispatched through the mod's shared Factorio event handlers. |
-| `game`, `defines`, `remote`, `rendering`, `prototypes` | Factorio runtime objects exposed directly to scripts. |
-
-The Lua standard-library values available in scripts are `math`, `table`,
-`string`, `pairs`, `ipairs`, `next`, `select`, `type`, `tostring`,
-`tonumber`, `pcall`, `xpcall`, `error`, `assert`, `rawget`, `rawset`,
-`rawequal`, `rawlen`, `setmetatable`, `getmetatable`, and `unpack`.
-
-`io`, `os`, `require`, `load`, `loadstring`, and `debug` are not exposed.
-This is still a trusted-author environment: scripts can directly access the
-Factorio runtime objects listed above.
-
-### Scheduled and event-driven execution
-
-With **Timer** enabled, code runs when the current tick is divisible by the
-configured interval. With it disabled, automatic execution occurs only when
-one of its registered `script.on_event` or `script.on_nth_tick` handlers
-fires; **Run Now** remains available from the editor.
-
-The runtime compiles each execution using a per-combinator environment and
-catches compile and runtime errors. Errors are stored as the combinator's
-last error and displayed by the editor rather than stopping the mod.
-
-Event handlers are re-created from source on game load and configuration
-changes because Lua closures are not saved by Factorio. During this setup
-pass, script-facing circuit functions use inert values so registration does
-not modify persistent state or output signals.
-
-## Data-stage prototypes
-
-[`data.lua`](./data.lua) defines the prototypes registered by the mod:
-
-| Prototype | Name | Source definition |
-|---|---|---|
-| Entity | `lua-combinator` | Deep copy of the base `decider-combinator`, with teal/cyan-tinted sprites and `minable.result` changed to `lua-combinator`. |
-| Item | `lua-combinator` | Places the entity; stack size 50; appears in the `circuit-network` subgroup. |
-| Virtual signal | `signal-lua-combinator` | Uses the base decider-combinator icon and appears in the `virtual-signal` subgroup. |
-| Recipe | `lua-combinator` | Initially disabled; costs 1 constant combinator, 3 advanced circuits, and 1 processing unit. |
-| Technology | `lua-combinator` | Requires `circuit-network`, costs 150 automation, logistic, and chemical science packs at 30 seconds each, and unlocks the recipe. |
-
-The virtual signal's localized name and description are in
-[`locale/en/locale.cfg`](./locale/en/locale.cfg).
-
-## Runtime implementation
-
-[`control.lua`](./control.lua) maintains one record per placed entity in
-`storage.combinators`, keyed by unit number. Each record stores the entity,
-code, interval, persistent script storage, last error, output-enabled flag,
-and timer-enabled flag.
-
-When a script queues outputs, the runtime writes them to the copied
-decider-combinator's control behavior as constant outputs behind an
-always-true condition. Disabling output or clearing it through the editor
-removes the behavior parameters.
-
-The mod registers placement, removal, clone, lifecycle, GUI, and tick
-handlers. Script-defined events are multiplexed so multiple placed Lua
-Combinators can register handlers for the same Factorio event or tick
-interval.
-
-## Included scripts
-
-The [`examples`](./examples) folder contains scripts intended to be pasted
-into a Lua Combinator:
-
-| Script | Purpose |
-|---|---|
-| [`example-plate-reminder.lua`](./examples/example-plate-reminder.lua) | Monitors an item count and emits status signals. |
-| [`example_reactor_monitor.lua`](./examples/example_reactor_monitor.lua) | Monitors reactor/heat-exchanger temperature with hysteresis. |
-| [`example_output_network_controller.lua`](./examples/example_output_network_controller.lua) | Aggregates rocket-silo status and controls entities on the output network. |
-| [`example_rocket_monitor.lua`](./examples/example_rocket_monitor.lua) | Rocket-silo monitoring and output-network control example. |
-
-## Project files
-
-| Path | Purpose |
-|---|---|
-| [`data.lua`](./data.lua) | Data-stage entity, item, signal, recipe, and technology prototypes. |
-| [`control.lua`](./control.lua) | Runtime execution engine, event dispatch, persistence, and GUI. |
-| [`API_REFERENCE.md`](./API_REFERENCE.md) | Complete script-facing API documentation. |
-| [`locale/en/locale.cfg`](./locale/en/locale.cfg) | English localization. |
-| [`examples`](./examples) | Ready-to-paste example scripts. |
+or, with a Lua 5.2 interpreter installed, `lua5.2 tests/run_tests.lua`.
